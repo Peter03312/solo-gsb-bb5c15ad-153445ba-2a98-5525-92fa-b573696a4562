@@ -1,0 +1,21 @@
+{
+  "name": "exhibit-authorization-app",
+  "version": "1.0.0",
+  "description": "小型展馆数字展品使用授权核验 Web 应用",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "test": "node test/e2e.js",
+    "attestation:keys": "node scripts/attestation-keys.js",
+    "attestation:verify": "node scripts/verify-attestation.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "express": "^4.21.2"
+  }
+}

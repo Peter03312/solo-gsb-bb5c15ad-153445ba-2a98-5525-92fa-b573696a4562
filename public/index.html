@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>数字展品授权核验</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>数字展品授权核验台</h1>
+    <div class="basis" title="授权或来源关系每变更一次，核验依据版本递增；发布时依据过期会被拒绝">
+      核验依据版本：<b id="basisVersion">–</b>
+      <span id="reviewBadge" class="badge badge-review hidden">需复核：0</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="materials">① 素材与来源</button>
+    <button class="tab" data-tab="packages">② 展览包与核验发布</button>
+  </nav>
+
+  <main>
+    <!-- ========== 素材与来源 ========== -->
+    <section id="tab-materials" class="tabpanel active">
+      <div class="toolbar toolbar-flex">
+        <form id="addMaterialForm" class="inline-form">
+          <input name="title" placeholder="素材名称（必填）" required />
+          <input name="kind" placeholder="类型，如 video / audio / image / font" class="w-10" />
+          <button class="btn" type="submit">＋ 登记素材</button>
+        </form>
+        <label class="preview-toggle" title="开启后，授权/来源关系的增改撤删将先弹出影响预演，确认后才真正提交">
+          <input type="checkbox" id="previewMode" checked />
+          授权 / 来源变更先做影响预演，再确认提交
+        </label>
+      </div>
+      <div id="materialsList" class="grid"></div>
+    </section>
+
+    <!-- ========== 展览包 ========== -->
+    <section id="tab-packages" class="tabpanel hidden">
+      <div class="panel">
+        <h2 id="pkgFormTitle">新建待发布展览包</h2>
+        <form id="packageForm">
+          <input type="hidden" name="packageId" />
+          <div class="form-row">
+            <label>包名称<input name="name" required placeholder="例如：常设展屏幕展包" /></label>
+          </div>
+          <div class="form-row">
+            <label class="preview-toggle" title="开启后为待发布展览包编排多站巡展；关闭即单站展（旧方式）">
+              <input type="checkbox" id="multiStopToggle" />
+              多站巡展（按站填写名称/媒介/地区/起止日期，站间不得重叠；整包共享素材清单）
+            </label>
+          </div>
+          <div class="form-row four" id="singleStopFields">
+            <label>展示媒介<input name="medium" placeholder="屏幕放映（* 表示任意媒介）" /></label>
+            <label>展示地区<input name="region" placeholder="中国大陆（* 表示任意地区）" /></label>
+            <label>起始日期<input name="useFrom" type="date" /></label>
+            <label>截止日期<input name="useTo" type="date" /></label>
+          </div>
+          <div class="form-row hidden" id="stopsEditor">
+            <div class="pick-label">巡展站次（按顺序展出；首尾日期均占用，相邻站不得重叠；不同站可用不同授权，同站不可拼接短授权）</div>
+            <table class="auth" id="stopsTable">
+              <tr><th style="width:32px">#</th><th>站点名称</th><th>展示媒介</th><th>展示地区</th><th>起始日</th><th>截止日</th><th></th></tr>
+            </table>
+            <button type="button" class="btn btn-small" id="addStopBtn">＋ 添加一站</button>
+          </div>
+          <div class="form-row">
+            <label class="pick-label">选取素材（自动包含其全部来源链，多站整包共享此清单）</label>
+            <div id="materialPick" class="pick"></div>
+          </div>
+          <div class="form-row actions">
+            <button type="submit" class="btn btn-primary" id="savePkgBtn">保存待发布包</button>
+            <button type="button" class="btn" id="verifyPkgBtn">核验</button>
+            <button type="button" class="btn" id="scheduleFormBtn">搜索档期</button>
+            <button type="button" class="btn" id="quoteFormBtn" title="为待发布 / 需复核包录入拟取得的授权报价，求总成本最低的补齐组合（只读预览，不写入任何数据）">授权报价预览</button>
+            <button type="button" class="btn" id="newPkgBtn">清空表单</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="verifyPanel" class="panel hidden"></div>
+
+      <div class="panel">
+        <div class="pkg-head">
+          <h2>联展批次发布（2～20 个待发布包）</h2>
+          <div class="pkg-actions">
+            <button type="button" class="btn btn-primary" id="batchFormBtn">组建联展批次并预览</button>
+          </div>
+        </div>
+        <div class="small-muted">
+          勾选 2～20 个待发布展览包组成联展批次：预览按包展示单站或多站逐站核验结果、共同依据版本与各包清单/行程指纹；
+          只要有包失格即列出缺口并禁止确认（预览不写入任何数据）。确认携带预览凭据，服务端在同一事务内核对包集合、待发布状态、依据版本与各包指纹并重算全部包，全部合格才一起封存不可变快照与签名凭证并转为已发布；任一不符整批拒绝、无部分发布。
+        </div>
+      </div>
+
+      <div id="packagesList" class="stack"></div>
+    </section>
+  </main>
+
+  <!-- 快照查看 / 影响预演弹层 -->
+  <div id="modalBackdrop" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="modalTitle">核验快照</h3>
+        <button class="btn" id="modalClose">关闭</button>
+      </div>
+      <div id="modalBody" class="modal-body"></div>
+      <div id="modalFoot" class="modal-foot hidden"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

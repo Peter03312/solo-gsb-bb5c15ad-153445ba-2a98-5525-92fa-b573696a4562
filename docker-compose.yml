@@ -1,0 +1,19 @@
+services:
+  exhibit-auth:
+    build: .
+    image: exhibit-authorization-app:latest
+    container_name: exhibit-authorization-app
+    ports:
+      - "3000:3000"
+    environment:
+      # 容器内 SQLite 数据库文件位置（挂载到宿主机，数据持久化）
+      DB_PATH: /data/app.db
+      PORT: "3000"
+      # 首次启动写入演示数据；数据库非空时自动跳过。正式使用可改为 0。
+      SEED_DEMO: "1"
+    volumes:
+      - exhibit-data:/data
+    restart: unless-stopped
+
+volumes:
+  exhibit-data:
