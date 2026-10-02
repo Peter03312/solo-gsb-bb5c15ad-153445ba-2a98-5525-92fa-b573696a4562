@@ -73,6 +73,7 @@ function initSchema(database) {
       region       TEXT,
       use_from     TEXT,
       use_to       TEXT,
+      hall_no      TEXT,                 -- 可选展厅编号（单站包）；去首尾空白、忽略大小写匹配；NULL/空串=未填写（不占用）
       status       TEXT NOT NULL DEFAULT 'draft',  -- draft | published | needs_review
       published_at TEXT,
       created_at   TEXT NOT NULL,
@@ -98,6 +99,7 @@ function initSchema(database) {
       region     TEXT NOT NULL,
       use_from   TEXT NOT NULL,
       use_to     TEXT NOT NULL,
+      hall_no    TEXT,                 -- 可选展厅编号（巡展每站）；归一化规则与 packages.hall_no 相同
       UNIQUE(package_id, position)
     );
 
@@ -162,6 +164,16 @@ function initSchema(database) {
     CREATE TRIGGER IF NOT EXISTS trg_attestation_no_delete BEFORE DELETE ON publish_attestations
     BEGIN SELECT RAISE(ABORT, 'publish attestations are immutable'); END;
   `);
+
+  // ---- 轻量迁移：既有数据库补齐展厅编号列（CREATE TABLE IF NOT EXISTS 不会改已存在的表）----
+  const pkgCols = database.prepare("PRAGMA table_info(packages)").all().map((c) => c.name);
+  if (!pkgCols.includes('hall_no')) {
+    database.exec('ALTER TABLE packages ADD COLUMN hall_no TEXT');
+  }
+  const stopCols = database.prepare("PRAGMA table_info(package_stops)").all().map((c) => c.name);
+  if (!stopCols.includes('hall_no')) {
+    database.exec('ALTER TABLE package_stops ADD COLUMN hall_no TEXT');
+  }
 }
 
 function tx(fn) {

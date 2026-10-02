@@ -12,6 +12,8 @@
 
 策展人还可选取 **2～20 个待发布展览包组成联展批次**：预览**按包**展示单站或多站**逐站核验结果**、**共同依据版本**及各包**清单指纹与行程指纹**；只要有一个包失格（或不存在/非待发布），就**按包列出缺口且不发放确认凭据、禁止确认**，预览**不写入任何数据**（无快照、无凭证、依据版本与包状态不变）。确认时**携带预览凭据**，服务端在**同一事务**内核对**包集合、各包待发布状态、共同依据版本与各包双指纹**，并按**当前授权及来源关系重算全部包**；全部合格时，先为每包封存与单包发布同构的**不可变发布快照与签名凭证**（`sealContext:"publish-batch"`，可被既有凭证导出与离线校验程序直接消费），再把整批**一起转为已发布**。包不存在、凭据不符、状态或依据变化、任一包重算失格时**整批拒绝**：不产生任何快照、凭证或部分发布（批次闸门失败不留痕；既有**单包发布**及其 **422 失败留痕**、凭证导出/补发/离线校验**完全兼容**）。页面与可调用的 HTTP API 均可完成该流程。
 
+策展人还可为**待发布单站包或巡展的每一站**填写**可选展厅编号**（`hallNo`）：编号**去首尾空白**存储、匹配**忽略大小写**（`A1`、` a1 ` 视为同一展厅）；**未填写**的包/站不参与占用、完全沿用原流程。待发布包编辑、复制时**保留编号但不预占**；**已发布及需复核包持续占用**，发布成功后编号随（冻结的）行程一起冻结（单站在包参数、多站在 `package_stops`，既有冻结触发器一并保护）。同一展厅的占用展期按**首尾均包含**的闭区间计算（`起 ≤ 对方止 且 对方起 ≤ 止` 即重叠，同日衔接也算冲突），不得被**不同包**重叠使用。**包核验**与**联展批次预览**都会列出冲突：冲突**包**、冲突**站次**（单站归一为单站展）与**重叠日期**；批次预览除了对当前已发布/需复核占用互查，还对**批次内各包互查**（同批会同时转为占用）。**单包发布**与**批次确认**在各自提交事务内**重新检查授权、当前占用与本批内部冲突**——单包冲突时沿用既有 `422` 失败留痕（包保持 draft、追加不可变快照），批次冲突则**整批拒绝且不产生快照或凭证**；**过期预览不得绕过复查**（凭据过期/漂移后他方抢占展厅，确认事务内仍会拦下）。既有无编号请求、授权核验、变更预演与离线凭证校验完全兼容（编号随发布凭证行程封存，旧离线校验程序可直接消费）。
+
 - 后端：Node.js 20 + Express + better-sqlite3（SQLite，同步事务）
 - 前端：原生 HTML/CSS/JS，无构建步骤
 - 交付：Dockerfile + docker-compose 一键启动，数据库自动初始化
@@ -75,7 +77,8 @@ node test/e2e.js
    - 登记授权：媒介、地区、有效期（起止日期）、撤销状态、授权方。媒介或地区填 `*` 表示通配任意值；匹配忽略大小写；有效期按闭区间覆盖整段使用期（`valid_from <= 使用起始` 且 `valid_to >= 使用截止`），已撤销授权一律不计入。
 2. **展览包与核验发布**
    - 新建待发布包：默认是**单站展**，填展示媒介、地区、起止日期，勾选入展素材（系统会自动纳入其全部上游来源节点）。
-   - 勾选「**多站巡展**」后切换为按站编排：逐站填写**站点名称、展示媒介、展示地区、起止日期**，可增删任意站数（至少 2 站）。站按表格顺序展出，**相邻站不得重叠**（首尾日期均算占用：后一站起始日须晚于前一站截止日）；整包共享同一份勾选的入展素材清单。多站行程仅在包处于待发布时可改，发布后冻结。
+   - **展厅编号（可选）**：单站包在表单的「展厅编号」框填写；多站包在每一行站次表格的「展厅编号」列按站填写。编号自动**去首尾空白**、比对时**忽略大小写**；**留空表示该包/该站不占用任何展厅**，行为与未启用本功能完全一致。待发布阶段编号仅保存（编辑、复制都保留）而**不预占**；点「核验」或「联展批次预览」时若与**已发布/需复核**包的同展厅展期（首尾均含）重叠，会在结果中用红框列出**冲突包、站次与重叠日期**；批次预览还会检查**本批各包之间**的互占。有冲突时不出现发布/确认按钮；强行调 API 发布会在提交事务内复查并被 `422 HALL_CONFLICT` 拒绝（单包仍留失败快照，批次整批不留痕）。发布成功后编号随行程冻结。可用 `GET /api/halls/occupancy` 查询当前全部（或指定展厅）的持续占用。
+   - 勾选「**多站巡展**」后切换为按站编排：逐站填写**站点名称、展示媒介、展示地区、起止日期（及可选展厅编号）**，可增删任意站数（至少 2 站）。站按表格顺序展出，**相邻站不得重叠**（首尾日期均算占用：后一站起始日须晚于前一站截止日）；整包共享同一份勾选的入展素材清单。多站行程仅在包处于待发布时可改，发布后冻结。
    - 点「核验」：
      - 单站包：沿每个入展品的**全部**来源路径遍历，逐节点检查是否至少有一份“未撤销 + 媒介命中 + 地区命中 + 覆盖整段使用期”的授权。
      - 多站包：共享来源链只遍历一次，然后**逐站**用该站自己的媒介/地区/展期判定。结果按站列出本站结论，失格站下展开问题节点、原因（无授权 / 全部撤销 / 媒介不符 / 地区不符 / 日期不覆盖（短授权不可拼接）/ 成环）及该节点的**全部来源路径**（入展品 → … → 问题节点）；任一站失格则整包不合格。
@@ -174,6 +177,7 @@ node test/e2e.js
 | 报价组合预览 | 只读，不写入任何数据；每站每节点须由一份现有授权或一份所选报价独自覆盖整段展期；同站不可拼接短授权/短报价；共享节点（含跨站）一份报价只计一次；最优=总成本最低→报价数少→输入序号序列字典序最小；已发布包不可预览 |
 | 替代素材方案 | 仅待发布包；至多 6 件原素材各带 1～8 件现有候选，重复编号/非包内原素材/不存在候选整次拒绝；恰选一件、按替换后去重清单重算完整来源链与逐站资格；仅全站合格方案可选，替换件数最少→最终清单升序→原顺序选中编号；预览只读；确认同事务核对状态/依据版本/双指纹并重算，任一不符整体拒绝 |
 | 联展批次发布 | 2～20 个待发布包成批；预览按包给出单站/多站逐站结果、共同依据版本与各包清单/行程指纹，有包失格即列缺口且不发凭据、禁止确认、不写入；确认携带凭据，同事务核对包集合/待发布状态/依据版本/各包指纹并重算全部包，全部合格才逐包封存不可变快照+签名凭证（`publish-batch`）并一起转已发布；包不存在/凭据不符/状态或依据变化/任一包失格整批拒绝，无快照、凭证或部分发布；单包发布与其 422 失败留痕、凭证导出保持兼容 |
+| 展厅编号占用 | 编号可选，去首尾空白、忽略大小写；未填写不占用；待发布编辑/复制保留编号但不预占；已发布/需复核持续占用、发布后随行程冻结；同一展厅展期按首尾均含闭区间比对，不同包不得重叠；核验与批次预览列出冲突包/站次/重叠日期（批次另查本批内部互占）；单包发布与批次确认在各自提交事务内重查授权、当前占用与本批内部冲突，单包冲突 422 沿用失败留痕，批次冲突整批拒绝无快照/凭证；过期预览不得绕过复查；无编号请求与离线凭证校验保持兼容 |
 
 不可变性由数据库强制：`verification_snapshots` 表与多站包发布后的 `package_stops` 行上配置了 `BEFORE UPDATE` / `BEFORE DELETE` 触发器，任何修改或删除都会被 SQLite 直接拒绝。
 
@@ -202,11 +206,12 @@ node test/e2e.js
 | `GET/POST /api/materials` · `PATCH/DELETE /api/materials/:id` | 素材 CRUD |
 | `POST /api/materials/:id/sources` · `DELETE /api/source-links/:id` | 来源关系（成环返回 409 + `cyclePath`/`cycle`） |
 | `POST /api/materials/:id/authorizations` · `PATCH /api/authorizations/:id` · `POST /api/authorizations/:id/revoke` · `DELETE` | 授权登记/修改/撤销/删除 |
-| `GET/POST /api/packages` · `PATCH/DELETE /api/packages/:id` · `POST /api/packages/:id/copy` | 展览包（POST/PATCH 传 `stops` 数组即多站包；`copy` 会复制行程） |
+| `GET/POST /api/packages` · `PATCH/DELETE /api/packages/:id` · `POST /api/packages/:id/copy` | 展览包（POST/PATCH 传 `stops` 数组即多站包；单站可传 `hallNo`、多站每个 stop 可传 `hallNo`；`copy` 会复制行程与各站编号） |
+| `GET /api/halls/occupancy` | **展厅占用查询（只读）**：列已发布/需复核包的持续占用（待发布不预占）；`?hall=A1` 按编号过滤（去空白、忽略大小写） |
 | `POST /api/verify` | 试核验（body 可传 `packageId`、单站完整字段，或 `{materialIds, stops[]}` 即席多站核验） |
 | `POST /api/packages/:id/schedule/search` | **档期搜索（仅单站）**：多站包返回 `409 MULTI_STOP_UNSUPPORTED` |
 | `POST /api/packages/:id/schedule/apply` | **选定档期改期（仅单站）**：多站包同样 `409 MULTI_STOP_UNSUPPORTED` |
-| `POST /api/packages/:id/publish` | 发布，body 需含核验时的 `basisVersion`；事务内重读行程/清单/依据，过期 409、任一站不合格 422；成功 201 在同一事务内封存签名发布凭证（`attestation`） |
+| `POST /api/packages/:id/publish` | 发布，body 需含核验时的 `basisVersion`；事务内重读行程/清单/依据**并重查展厅占用**，过期 409、任一站不合格或展厅冲突 422（`HALL_CONFLICT`，沿用失败留痕）；成功 201 在同一事务内封存签名发布凭证（`attestation`，行程含各站 `hallNo`） |
 | `GET /api/packages/:id/attestation` · `GET /api/attestations/by-snapshot/:snapshotId` | 导出已封存发布凭证（`?download=1` 带附件头） |
 | `POST /api/attestations/reissue` | 旧成功发布快照补发凭证（只读快照自身；缺证明字段 422 `UNSUPPORTED_SNAPSHOT`；幂等） |
 | `GET /api/attestation-keys` · `POST /api/attestation-keys/rotate` | 本机签名公钥（当前+历史归档）查询 / 密钥轮换（旧公钥保留） |
@@ -216,13 +221,13 @@ node test/e2e.js
 | `POST /api/packages/:id/quotes/preview` | **授权报价组合预览（只读）**：求总成本最低的报价组合覆盖全部站次全部来源节点；无解列出站次/节点/来源路径缺口；不写入任何数据；已发布包 `409 PACKAGE_PUBLISHED` |
 | `POST /api/packages/:id/substitutes/preview` | **替代素材方案预览（只读）**：至多 6 件包内原素材各带 1～8 件现有候选，枚举恰选一件的全部组合，取替换最少→最终清单升序→原顺序选中编号的全站合格最优方案；无解返回当前清单逐站缺口 |
 | `POST /api/packages/:id/substitutes/apply` | **确认应用替代方案**：同一事务内核对待发布状态、依据版本、清单/行程指纹并重算最优方案；过期/输入不符/重算失格均整体拒绝，不部分修改 |
-| `POST /api/batches/preview` | **联展批次预览（只读）**：body `{packageIds:[2～20 个包]}`，按包返回单站/多站逐站核验、共同依据版本、各包清单/行程指纹；有包失格不列确认凭据；不写入任何数据 |
-| `POST /api/batches/confirm` | **联展批次整批发布**：body `{confirmToken}`（原样回传预览凭据）；单事务核对包集合/待发布状态/依据版本/各包指纹并重算全部包，全部合格才逐包封存不可变快照+签名凭证并一起转已发布；任一不符整批拒绝，无快照/凭证/部分发布 |
+| `POST /api/batches/preview` | **联展批次预览（只读）**：body `{packageIds:[2～20 个包]}`，按包返回单站/多站逐站核验、共同依据版本、各包清单/行程指纹与**展厅占用冲突（对当前占用 + 本批内部互查，含冲突包/站次/重叠日期）**；有包失格或展厅冲突即不列确认凭据；不写入任何数据 |
+| `POST /api/batches/confirm` | **联展批次整批发布**：body `{confirmToken}`（原样回传预览凭据）；单事务核对包集合/待发布状态/依据版本/各包指纹，重算全部包**并重查当前展厅占用与本批内部冲突**，全部合格才逐包封存不可变快照+签名凭证并一起转已发布；任一不符（含 `422 HALL_CONFLICT`、`RECOMPUTE_DISQUALIFIED`）整批拒绝，无快照/凭证/部分发布 |
 | `GET /api/snapshots/:id` | 读取不可变快照完整内容 |
 
 ### 多站巡展 API 调用示例
 
-新建/保存待发布包时，除顶层 `name` 与 `materialIds`（整包共享）外，传 `stops` 数组（≥2 站）即为多站包；不传 `stops` 即既有单站包（兼容）。
+新建/保存待发布包时，除顶层 `name` 与 `materialIds`（整包共享）外，传 `stops` 数组（≥2 站）即为多站包；不传 `stops` 即既有单站包（兼容）。单站包可在顶层传可选 `hallNo`，多站包可在每个 stop 内传可选 `hallNo`（去首尾空白、忽略大小写；留空不占用）。
 
 第 1 步——创建多站待发布包：
 
@@ -666,6 +671,90 @@ node scripts/verify-attestation.js attestation-pkg12.json trusted-pubkeys.pem
 
 > 语义与兼容说明：联展批次是一个**原子发布闸门**——确认失败不留任何痕迹（与单包发布失败 `422` 仍追加不可变快照的既有行为刻意区分）；批次不影响**单包发布** `POST /api/packages/:id/publish`（含其 `422` 失败留痕）、凭证导出、旧快照补发与离线校验。批次预览同样是只读的：调用前后 `/api/state` 的 `basisVersion` 不变，包状态与快照表均无变化。
 
+### 展厅编号 API 调用示例（可选；未填写完全沿用原流程）
+
+单站包在包顶层传 `hallNo`（字符串，可空/省略；自动去首尾空白，比对忽略大小写）：
+
+```bash
+# 待发布包 A：展厅 A1，3 月整月（编号保存但不预占）
+curl -s -X POST http://localhost:3000/api/packages \
+  -H 'Content-Type: application/json' \
+  -d '{ "name": "春季一号厅包", "medium": "屏幕放映", "region": "中国大陆",
+        "useFrom": "2026-03-01", "useTo": "2026-03-31",
+        "hallNo": " A1 ", "materialIds": [1] }'
+# → 201 { id: 10, hallNo: "A1", status: "draft", … }   ← 存储为去空白后的 "A1"
+
+# 核验：结果中新增 hallConflicts（待发布不与其它草稿互查，只对已发布/需复核占用）
+curl -s -X POST http://localhost:3000/api/verify -H 'Content-Type: application/json' \
+  -d '{"packageId": 10}'
+# → 无冲突：eligible:true, hallConflictCount:0, request.hallNo:"A1"
+#   有冲突：hallConflicts 列出 { hallNo, conflicts:[{ packageId, packageName,
+#     packageStatus, stopPosition(null=单站), stopName, overlapFrom, overlapTo }] }
+
+# 发布：提交事务内重查授权 + 当前占用；冲突 → 422 HALL_CONFLICT（沿用失败留痕）
+curl -s -X POST http://localhost:3000/api/packages/10/publish \
+  -H 'Content-Type: application/json' -d '{"basisVersion": 22}'
+# → 201：attestation.body.itinerary.stops[0].hallNo === "A1"（编号随发布冻结）
+#   冲突时：422 { error, details:{ code:"HALL_CONFLICT", snapshotId, hallConflicts, result } }
+```
+
+多站巡展在**每个 stop** 内传 `hallNo`（同样可空；未填的站不占用）：
+
+```bash
+curl -s -X POST http://localhost:3000/api/packages \
+  -H 'Content-Type: application/json' \
+  -d '{ "name": "2026 双城巡展", "materialIds": [1], "stops": [
+    { "name": "北京首展", "media": "屏幕放映", "region": "中国大陆",
+      "useFrom": "2026-03-01", "useTo": "2026-03-20", "hallNo": "京-A1" },
+    { "name": "香港巡展", "media": "沉浸式投影", "region": "中国香港",
+      "useFrom": "2026-05-01", "useTo": "2026-05-20" }   // 该站不填 → 不占用
+  ]}'
+# → 201 DTO stops[0].hallNo="京-A1"、stops[1].hallNo=null
+```
+
+冲突拒绝（闭区间、首尾均含；`A1` 与 `a1` 同厅；3/31 与 3/31 重叠）示例：
+
+```jsonc
+// POST /api/packages/11/publish { "basisVersion": 22 }
+// 422
+{ "error": "展厅占用冲突，拒绝发布：同一展厅展期（首尾均含）不得重叠。单站展（展厅 A1）与包 #10「春季一号厅包」（展厅 a1）展期重叠：重叠日期 2026-03-31 ～ 2026-03-31（首尾均含）",
+  "details": {
+    "code": "HALL_CONFLICT",
+    "snapshotId": 7,
+    "hallConflicts": [ { "packageId": 11, "packageName": "…",
+      "claims": [ { "stopPosition": null, "stopName": null, "hallNo": "A1",
+        "conflicts": [ { "hallNo": "a1", "normalizedHallNo": "a1",
+          "packageId": 10, "packageName": "春季一号厅包", "packageStatus": "published",
+          "stopPosition": null, "stopName": null,
+          "overlapFrom": "2026-03-31", "overlapTo": "2026-03-31" } ] } ] } ],
+    "result": { /* 完整核验结果（含 hallConflicts，已留存为不可变快照）*/ } } }
+```
+
+联展批次预览新增展厅冲突维度（对当前已发布/需复核占用 + **本批各包内部互查**）；有冲突则 `eligible:false`、**没有** `confirmToken`：
+
+```bash
+curl -s -X POST http://localhost:3000/api/batches/preview \
+  -H 'Content-Type: application/json' -d '{"packageIds":[12,13]}'
+# → 200 { eligible:false, hallConflictCount:2, hallConflicts:[…按包：claims[*].conflicts…],
+#         packages:[ { packageId, …, hallConflictCount, hallConflicts, stops:[…,hallNo…] } ] }
+# 无冲突时 eligible:true 且正常发放 confirmToken；
+# 用旧凭据确认而期间展厅被他方抢占 → 422 HALL_CONFLICT（整批拒绝，无快照/凭证）。
+```
+
+查询当前持续占用（只读；只含已发布/需复核，待发布不预占）：
+
+```bash
+curl -s 'http://localhost:3000/api/halls/occupancy'            # 全部展厅
+curl -s 'http://localhost:3000/api/halls/occupancy?hall= a1 '  # 仅 A1（去空白、忽略大小写）
+# → { ok:true, count:2, filter:" a1 ", occupancy:[
+#     { packageId:10, packageName:"春季一号厅包", packageStatus:"published",
+#       stopPosition:null, stopName:null, hallNo:"A1", useFrom:"2026-03-01", useTo:"2026-03-31" },
+#     { packageId:12, packageName:"双城巡展", packageStatus:"needs_review",
+#       stopPosition:0, stopName:"北京首展", hallNo:"京-A1", useFrom:"…", useTo:"…" } ] }
+```
+
+兼容说明：不传或传空/全空白 `hallNo` 的请求与旧客户端行为完全一致（DTO 返回 `hallNo:null`，核验/发布/批次/凭证结构仅**新增**字段）；展厅编号不参与核验依据版本（`basisVersion`）计数，也不影响授权核验、变更预演、档期、报价、替代素材等既有功能；离线凭证校验程序对多出来的 `itinerary.stops[*].hallNo` 字段天然兼容（签名仍覆盖该字段，篡改即签名失效）。
+
 ## 八、发布凭证：签发、导出与离线独立校验
 
 发布成功（单站或多站）时，服务端在**写入不可变发布快照、置为已发布的同一个 SQLite 事务内**，同时封存一份自包含、可导出的签名凭证（`publish_attestations` 表，与快照表一样有 UPDATE/DELETE 拒绝触发器）。经**联展批次**整批发布时，批次内每包也在同一个批次事务内各封存一份同构凭证，其 `sealContext` 为 `publish-batch`（单包发布为 `publish`，旧快照补发为 `reissue-from-snapshot`），导出与离线校验方式完全相同。
@@ -677,7 +766,7 @@ node scripts/verify-attestation.js attestation-pkg12.json trusted-pubkeys.pem
 | `manifest` | 当时的入展素材清单（素材 id） |
 | `materials` | 清单与来源闭包内全部节点（id/标题/类型） |
 | `sourceSubgraph` | **完整来源子图**：发布当时这些节点之间的全部来源边（`from → to`，含关系标注） |
-| `itinerary` | **逐站行程**（单站为 1 站；多站为冻结的全部站：站名/媒介/地区/起止日） |
+| `itinerary` | **逐站行程**（单站为 1 站；多站为冻结的全部站：站名/媒介/地区/起止日/可选展厅编号 `hallNo`） |
 | `terms` | 每个节点**实际采用**的那份**未撤销授权条款全文**（id、所属素材、媒介、地区、有效期、授权方；显式 `revoked:false`） |
 | `adoptions` | **站 × 节点 → 条款**的逐站采用关系（每个站每个节点恰好一份，不拼接） |
 | `paths` | 每个节点的**全部来源路径**（从清单素材到该节点，含节点标题） |
@@ -785,7 +874,8 @@ details.missingFields = ["…nodes[materialId=…].paths", "…matchedAuthorizat
 ├── docker-entrypoint.sh    # 可选演示数据初始化后启动
 ├── package.json
 ├── src
-│   ├── db.js               # SQLite 连接、建表（含 package_stops 行程表/冻结触发器）、版本号/快照/凭证不可变触发器
+│   ├── db.js               # SQLite 连接、建表（含 package_stops 行程表/冻结触发器、展厅编号列与轻量迁移）、版本号/快照/凭证不可变触发器
+│   ├── halls.js            # 展厅编号：归一化（去空白/忽略大小写）、闭区间占用、对已发布/需复核占用与批次内部互查的冲突检测
 │   ├── rules.js            # 核验规则确定性核心与规则版本（发布端与离线校验端共用同一套定义）
 │   ├── attest-keys.js      # 本机持久化 Ed25519 密钥环：惰性生成、签名/验签、canonical JSON、轮换与公钥归档
 │   ├── attest.js           # 发布凭证构建：同从事务封存完整证明要素；旧快照补发（缺字段明确拒绝）

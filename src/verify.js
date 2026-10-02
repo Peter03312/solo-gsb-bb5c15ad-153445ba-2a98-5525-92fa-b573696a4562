@@ -170,6 +170,7 @@ function verifyPackage(db, input) {
   const region = (input.region || '').trim();
   const useFrom = input.useFrom || '';
   const useTo = input.useTo || '';
+  const hallNo = normalizeHall(input.hallNo ?? input.hall);
 
   const globalErrors = [];
   if (materialIds.length === 0) globalErrors.push('展览包未选取任何素材');
@@ -291,7 +292,7 @@ function verifyPackage(db, input) {
     generatedAt: new Date().toISOString(),
     basisVersion: basisVersion(db),
     rules: rulesInfo(),
-    request: { materialIds, medium, region, useFrom, useTo },
+    request: { materialIds, medium, region, useFrom, useTo, hallNo },
     eligible,
     globalErrors,
     itemErrors,
@@ -350,11 +351,19 @@ function normalizeStop(raw, index) {
     region: strTrim(s.region),
     useFrom: typeof s.useFrom === 'string' ? s.useFrom.trim() : '',
     useTo: typeof s.useTo === 'string' ? s.useTo.trim() : '',
+    hallNo: normalizeHall(s.hallNo ?? s.hall),
   };
 }
 
 function strTrim(v) {
   return v === null || v === undefined ? '' : String(v).trim();
+}
+
+// 可选展厅编号：去首尾空白；空值归一为 null（未填写不占用、不参与冲突检测）
+function normalizeHall(v) {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s;
 }
 
 // 站次自身字段校验；返回该站错误信息数组
@@ -534,6 +543,7 @@ function verifyMultiStop(db, input) {
       region: st.region,
       useFrom: st.useFrom,
       useTo: st.useTo,
+      hallNo: st.hallNo,
       valid: stopErrors[st.index].length === 0,
       errors: stopErrors[st.index],
       eligible: stopErrors[st.index].length === 0 && failingNodes.length === 0,
@@ -568,7 +578,7 @@ function verifyMultiStop(db, input) {
     multiStop: true,
     request: {
       materialIds,
-      stops: stops.map((s) => ({ position: s.index, name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom, useTo: s.useTo })),
+      stops: stops.map((s) => ({ position: s.index, name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom, useTo: s.useTo, hallNo: s.hallNo })),
     },
     eligible,
     globalErrors,
@@ -596,7 +606,7 @@ function verifyMultiStop(db, input) {
 
 // 读取已存储包（单站/多站）并按其形态核验。stops 由调用方/本函数从 package_stops 载入。
 function loadStops(db, packageId) {
-  return db.prepare('SELECT position, name, medium, region, use_from, use_to FROM package_stops WHERE package_id=? ORDER BY position')
+  return db.prepare('SELECT position, name, medium, region, use_from, use_to, hall_no FROM package_stops WHERE package_id=? ORDER BY position')
     .all(packageId)
     .map((r) => ({
       position: r.position,
@@ -605,6 +615,7 @@ function loadStops(db, packageId) {
       region: r.region,
       useFrom: r.use_from,
       useTo: r.use_to,
+      hallNo: normalizeHall(r.hall_no),
     }));
 }
 
@@ -614,7 +625,7 @@ function verifyStoredPackage(db, pkg, items, stopsRows) {
     return verifyMultiStop(db, {
       materialIds: items,
       stops: stops.map((s) => ({
-        name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom ?? s.use_from, useTo: s.useTo ?? s.use_to,
+        name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom ?? s.use_from, useTo: s.useTo ?? s.use_to, hallNo: s.hallNo ?? s.hall_no,
       })),
     });
   }
@@ -624,12 +635,12 @@ function verifyStoredPackage(db, pkg, items, stopsRows) {
     region: pkg.region,
     useFrom: pkg.use_from,
     useTo: pkg.use_to,
+    hallNo: normalizeHall(pkg.hall_no),
   });
 }
 
 // 授权/来源变更后：仅把“由合格变不合格”的已发布包标为需复核，追加 review 快照。
-function revalidatePublished(db) {
-  const rows = db
+function revalidatePublished(db) {  const rows = db
     .prepare("SELECT * FROM packages WHERE status IN ('published','needs_review') ORDER BY id")
     .all();
   const flagged = [];
@@ -666,6 +677,7 @@ module.exports = {
   stopFieldErrors,
   stopOverlapErrors,
   normalizeStop,
+  normalizeHall,
   revalidatePublished,
   REASON_TEXT,
   STOP_REASON_TEXT,

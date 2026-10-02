@@ -46,6 +46,7 @@ function normalizeResult(result) {
       region: s.region,
       useFrom: s.useFrom,
       useTo: s.useTo,
+      hallNo: s.hallNo ?? null,
     }))
     : [{
       position: 0,
@@ -54,6 +55,7 @@ function normalizeResult(result) {
       region: result.request.region,
       useFrom: result.request.useFrom,
       useTo: result.request.useTo,
+      hallNo: result.request.hallNo ?? null,
     }];
   // 每个节点（含标题等）取一份；多站各站节点集合相同，取第一站即可
   const nodeRows = multi ? (result.stops && result.stops[0] ? result.stops[0].nodes : []) : result.nodes;
@@ -213,7 +215,7 @@ function buildAttestation(db, opts) {
       stops: stops
         .map((s) => ({
           position: s.position, name: s.name ?? null, medium: s.medium,
-          region: s.region, useFrom: s.useFrom, useTo: s.useTo,
+          region: s.region, useFrom: s.useFrom, useTo: s.useTo, hallNo: s.hallNo ?? null,
         }))
         .sort((a, b) => a.position - b.position),
     },
@@ -270,13 +272,14 @@ function buildAttestationFromSnapshot(opts) {
     } else {
       stops = req.stops.map((s) => ({
         position: s.position, name: s.name ?? null, medium: s.medium, region: s.region,
-        useFrom: s.useFrom, useTo: s.useTo,
+        useFrom: s.useFrom, useTo: s.useTo, hallNo: s.hallNo ?? null,
       }));
     }
   } else {
     stops = [{
       position: 0, name: null,
       medium: req.medium, region: req.region, useFrom: req.useFrom, useTo: req.useTo,
+      hallNo: req.hallNo ?? null,
     }];
     if (!req.medium || !req.region || !req.useFrom || !req.useTo) {
       missing.push('request.medium/region/useFrom/useTo');

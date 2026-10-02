@@ -21,6 +21,18 @@ const { searchSchedule, applySchedule, ScheduleError } = require('./schedule');
 const { previewQuotes, QuoteError } = require('./quotes');
 const { previewSubstitutions, applySubstitutions, SubstituteError } = require('./substitutes');
 const { previewBatch, confirmBatch, BatchError } = require('./batch');
+const {
+  normalizeHallNo,
+  claimsFromResult,
+  currentConflictsForPackage,
+  conflictsAgainstCurrent,
+  conflictsInternal,
+  flattenReport,
+  mergeReports,
+  groupConflictsByPackage,
+  describeConflict,
+  currentOccupancies,
+} = require('./halls');
 const keyring = require('./attest-keys');
 const { buildAttestation, buildAttestationFromSnapshot, UnsupportedSnapshotError } = require('./attest');
 
@@ -102,8 +114,9 @@ function packageDTO(p, full = false) {
     )
     .all(p.id);
   const stopRows = db
-    .prepare('SELECT position, name, medium, region, use_from AS useFrom, use_to AS useTo FROM package_stops WHERE package_id=? ORDER BY position')
-    .all(p.id);
+    .prepare('SELECT position, name, medium, region, use_from AS useFrom, use_to AS useTo, hall_no AS hallNo FROM package_stops WHERE package_id=? ORDER BY position')
+    .all(p.id)
+    .map((s) => ({ ...s, hallNo: s.hallNo ? String(s.hallNo).trim() : null }));
   const multiStop = stopRows.length >= 2;
   const latest = db
     .prepare('SELECT * FROM verification_snapshots WHERE package_id=? ORDER BY id DESC LIMIT 1')
@@ -121,6 +134,7 @@ function packageDTO(p, full = false) {
     region: p.region,
     useFrom: p.use_from,
     useTo: p.use_to,
+    hallNo: p.hall_no ? String(p.hall_no).trim() : null,
     multiStop,
     stopCount: stopRows.length,
     stops: stopRows.map((s) => ({ ...s, position: s.position })),
@@ -384,6 +398,7 @@ function readPackageBody(body) {
       region: first.region,
       useFrom: first.useFrom,
       useTo: first.useTo,
+      hallNo: first.hallNo,
       materialIds,
       stops,
     };
@@ -393,16 +408,17 @@ function readPackageBody(body) {
   const useFrom = str(body.useFrom).trim();
   const useTo = str(body.useTo).trim();
   validateDateRange(useFrom, useTo);
-  return { name, medium, region, useFrom, useTo, materialIds, multiStop: false, stops: null };
+  const hallNo = normalizeHallNo(body.hallNo ?? body.hall);
+  return { name, medium, region, useFrom, useTo, hallNo, materialIds, multiStop: false, stops: null };
 }
 
 // 多站行程落库（调用方须已开启事务且包为 draft）
 function replaceStops(packageId, stops) {
   db.prepare('DELETE FROM package_stops WHERE package_id=?').run(packageId);
   const ins = db.prepare(
-    'INSERT INTO package_stops(package_id, position, name, medium, region, use_from, use_to) VALUES (?,?,?,?,?,?,?)'
+    'INSERT INTO package_stops(package_id, position, name, medium, region, use_from, use_to, hall_no) VALUES (?,?,?,?,?,?,?,?)'
   );
-  stops.forEach((s, i) => ins.run(packageId, i, s.name, s.medium, s.region, s.useFrom, s.useTo));
+  stops.forEach((s, i) => ins.run(packageId, i, s.name, s.medium, s.region, s.useFrom, s.useTo, s.hallNo));
 }
 
 app.post('/api/packages', (req, res, next) => {
@@ -410,8 +426,8 @@ app.post('/api/packages', (req, res, next) => {
     const b = readPackageBody(req.body);
     for (const id of b.materialIds) loadMaterial(id);
     const info = tx(() => {
-      const r = db.prepare('INSERT INTO packages(name, medium, region, use_from, use_to, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(b.name, b.medium, b.region, b.useFrom, b.useTo, 'draft', nowIso(), nowIso());
+      const r = db.prepare('INSERT INTO packages(name, medium, region, use_from, use_to, hall_no, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(b.name, b.medium, b.region, b.useFrom, b.useTo, b.multiStop ? null : b.hallNo, 'draft', nowIso(), nowIso());
       const pid = r.lastInsertRowid;
       b.materialIds.forEach((mid, i) => {
         db.prepare('INSERT INTO package_items(package_id, material_id, position) VALUES (?,?,?)').run(pid, mid, i);
@@ -440,8 +456,8 @@ app.patch('/api/packages/:id', (req, res, next) => {
     const b = readPackageBody(req.body);
     for (const mid of b.materialIds) loadMaterial(mid);
     tx(() => {
-      db.prepare('UPDATE packages SET name=?, medium=?, region=?, use_from=?, use_to=?, updated_at=? WHERE id=?')
-        .run(b.name, b.medium, b.region, b.useFrom, b.useTo, nowIso(), id);
+      db.prepare('UPDATE packages SET name=?, medium=?, region=?, use_from=?, use_to=?, hall_no=?, updated_at=? WHERE id=?')
+        .run(b.name, b.medium, b.region, b.useFrom, b.useTo, b.multiStop ? null : b.hallNo, nowIso(), id);
       db.prepare('DELETE FROM package_items WHERE package_id=?').run(id);
       b.materialIds.forEach((mid, i) => {
         db.prepare('INSERT INTO package_items(package_id, material_id, position) VALUES (?,?,?)').run(id, mid, i);
@@ -460,15 +476,15 @@ app.post('/api/packages/:id/copy', (req, res, next) => {
     if (!pkg) throw new HttpError(404, '展览包不存在');
     const items = db.prepare('SELECT material_id, position FROM package_items WHERE package_id=? ORDER BY position').all(id);
     const newId = tx(() => {
-      const r = db.prepare('INSERT INTO packages(name, medium, region, use_from, use_to, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(`${pkg.name}（副本）`, pkg.medium, pkg.region, pkg.use_from, pkg.use_to, 'draft', nowIso(), nowIso());
+      const r = db.prepare('INSERT INTO packages(name, medium, region, use_from, use_to, hall_no, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(`${pkg.name}（副本）`, pkg.medium, pkg.region, pkg.use_from, pkg.use_to, pkg.hall_no, 'draft', nowIso(), nowIso());
       items.forEach((it) => {
         db.prepare('INSERT OR IGNORE INTO package_items(package_id, material_id, position) VALUES (?,?,?)')
           .run(r.lastInsertRowid, it.material_id, it.position);
       });
-      // 多站行程随副本复制（副本为待发布，仍可继续编排）
+      // 多站行程（含各站展厅编号）随副本复制（副本为待发布，编号保留但不预占，仍可继续编排）
       db.prepare(
-        'INSERT INTO package_stops(package_id, position, name, medium, region, use_from, use_to) SELECT ?, position, name, medium, region, use_from, use_to FROM package_stops WHERE package_id=? ORDER BY position'
+        'INSERT INTO package_stops(package_id, position, name, medium, region, use_from, use_to, hall_no) SELECT ?, position, name, medium, region, use_from, use_to, hall_no FROM package_stops WHERE package_id=? ORDER BY position'
       ).run(r.lastInsertRowid, id);
       return r.lastInsertRowid;
     });
@@ -492,24 +508,27 @@ app.post('/api/verify', (req, res, next) => {
   try {
     let materialIds;
     let stops = null;
+    let pkgRow = null;
     if (req.body.packageId) {
-      const pkg = db.prepare('SELECT * FROM packages WHERE id=?').get(Number(req.body.packageId));
-      if (!pkg) throw new HttpError(404, '展览包不存在');
-      materialIds = db.prepare('SELECT material_id FROM package_items WHERE package_id=?').all(pkg.id).map((r) => r.material_id);
-      const stopRows = loadStops(db, pkg.id);
+      pkgRow = db.prepare('SELECT * FROM packages WHERE id=?').get(Number(req.body.packageId));
+      if (!pkgRow) throw new HttpError(404, '展览包不存在');
+      materialIds = db.prepare('SELECT material_id FROM package_items WHERE package_id=?').all(pkgRow.id).map((r) => r.material_id);
+      const stopRows = loadStops(db, pkgRow.id);
       if (stopRows.length >= 2) {
         const result = verifyMultiStop(db, {
           materialIds,
-          stops: stopRows.map((s) => ({ name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom, useTo: s.useTo })),
+          stops: stopRows.map((s) => ({ name: s.name, medium: s.medium, region: s.region, useFrom: s.useFrom, useTo: s.useTo, hallNo: s.hallNo })),
         });
+        attachHallInfo(db, result, pkgRow.id, pkgRow.name);
         return res.json(result);
       }
-      req.body = { ...req.body, medium: pkg.medium, region: pkg.region, useFrom: pkg.use_from, useTo: pkg.use_to };
+      req.body = { ...req.body, medium: pkgRow.medium, region: pkgRow.region, useFrom: pkgRow.use_from, useTo: pkgRow.use_to, hallNo: pkgRow.hall_no };
     } else if (Array.isArray(req.body.stops)) {
       // 即席多站核验（无需已保存包）
       materialIds = req.body.materialIds || [];
       stops = req.body.stops;
       const result = verifyMultiStop(db, { materialIds, stops });
+      attachAdHocHallInfo(db, result, req.body.packageName || null);
       return res.json(result);
     } else {
       materialIds = req.body.materialIds || [];
@@ -520,10 +539,41 @@ app.post('/api/verify', (req, res, next) => {
       region: req.body.region,
       useFrom: req.body.useFrom,
       useTo: req.body.useTo,
+      hallNo: req.body.hallNo ?? req.body.hall,
     });
+    if (pkgRow) attachHallInfo(db, result, pkgRow.id, pkgRow.name);
+    else attachAdHocHallInfo(db, result, req.body.packageName || null);
     res.json(result);
   } catch (e) { next(e); }
 });
+
+// 把扁平冲突写回核验结果（响应与快照 payload 均保留展厅冲突信息）
+function withHallConflicts(result, flat, packageId) {
+  result.hallConflicts = groupConflictsByPackage(flat).flatMap((g) => g.claims.map((c) => ({
+    packageId: packageId === undefined ? g.packageId : packageId,
+    packageName: g.packageName,
+    stopPosition: c.stopPosition,
+    stopName: c.stopName,
+    hallNo: c.hallNo,
+    conflicts: c.conflicts,
+  })));
+  result.hallConflictCount = flat.length;
+  return result;
+}
+
+// 已保存包核验：展厅冲突对“当前已发布/需复核占用（排除自身）”计算
+function attachHallInfo(db, result, packageId, packageName) {
+  const flat = currentConflictsForPackage(db, packageId, packageName, result);
+  withHallConflicts(result, flat, packageId);
+}
+
+// 即席核验（无包 id）：用临时 id 0 装配待判定占用，仅与当前占用互查
+function attachAdHocHallInfo(db, result, packageName) {
+  const claims = claimsFromResult(result, 0, packageName);
+  const byPkg = new Map([[0, { packageName, claims }]]);
+  const flat = flattenReport(conflictsAgainstCurrent(db, byPkg));
+  withHallConflicts(result, flat, null);
+}
 
 // ---------- 发布：原子保存不可变快照 + 冻结清单 ----------
 app.post('/api/packages/:id/publish', (req, res, next) => {
@@ -551,17 +601,33 @@ app.post('/api/packages/:id/publish', (req, res, next) => {
         .map((r) => r.material_id);
       // 发布时在同一事务内重读行程、清单与授权依据：多站包逐站核验，任一站失败则整包不发布
       const result = verifyStoredPackage(db, pkg, items);
-      return { eligible: result.eligible, result };
+      // 同一事务内重查展厅占用（已发布/需复核包的闭区间占用，排除自身）
+      const hallFlat = currentConflictsForPackage(db, id, pkg.name, result);
+      return { eligible: result.eligible, result, hallFlat };
     });
 
-    if (!decision.eligible) {
-      // 不合格：独立事务留存不可变的发布尝试记录，包状态不变（仍为 draft）
+    const hallBlocked = decision.hallFlat.length > 0;
+    if (!decision.eligible || hallBlocked) {
+      // 不合格或展厅冲突：独立事务留存不可变的发布尝试记录，包状态不变（仍为 draft）
+      const storedResult = decision.hallFlat.length
+        ? withHallConflicts(decision.result, decision.hallFlat)
+        : decision.result;
       const snapId = tx(() => db.prepare(
         `INSERT INTO verification_snapshots(package_id, kind, basis_version, eligible, payload, created_at)
          VALUES (?,?,?,?,?,?)`
-      ).run(id, 'publish', decision.result.basisVersion, 0, JSON.stringify(decision.result), nowIso()).lastInsertRowid);
-      throw new HttpError(422, '核验未通过，拒绝发布：缺少授权或日期不合法。请按核验结果修正后重试。',
-        { result: decision.result, snapshotId: snapId });
+      ).run(id, 'publish', decision.result.basisVersion, 0, JSON.stringify(storedResult), nowIso()).lastInsertRowid);
+      if (!decision.eligible) {
+        throw new HttpError(422, '核验未通过，拒绝发布：缺少授权或日期不合法。请按核验结果修正后重试。',
+          { code: 'VERIFICATION_FAILED', result: storedResult, snapshotId: snapId });
+      }
+      throw new HttpError(422,
+        `展厅占用冲突，拒绝发布：同一展厅展期（首尾均含）不得重叠。${decision.hallFlat.map(describeConflict).join('；')}`,
+        {
+          code: 'HALL_CONFLICT',
+          result: storedResult,
+          snapshotId: snapId,
+          hallConflicts: groupConflictsByPackage(decision.hallFlat),
+        });
     }
 
     // 合格：事务 B 原子提交：不可变快照 + 发布凭证（同一事务封存）+ published 状态
@@ -585,8 +651,17 @@ app.post('/api/packages/:id/publish', (req, res, next) => {
       if (!resultFinal.eligible) {
         // 防御性分支（正常路径在事务 A 已判 422）：整体回滚，不封存任何成功记录
         throw new HttpError(422, '核验未通过，拒绝发布：缺少授权或日期不合法。请按核验结果修正后重试。',
-          { result: resultFinal });
+          { code: 'VERIFICATION_FAILED', result: resultFinal });
       }
+      // 提交事务内再次重查授权与当前展厅占用（过期预览不得绕过复查）
+      const hallFlatFinal = currentConflictsForPackage(db, id, pkg.name, resultFinal);
+      if (hallFlatFinal.length) {
+        // 整体回滚，不封存快照/凭证、不发布（事务 A 之后占用发生变化的兜底分支）
+        throw new HttpError(422,
+          `展厅占用冲突，拒绝发布：同一展厅展期（首尾均含）不得重叠。${hallFlatFinal.map(describeConflict).join('；')}`,
+          { code: 'HALL_CONFLICT', hallConflicts: groupConflictsByPackage(hallFlatFinal) });
+      }
+      withHallConflicts(resultFinal, [], id);
 
       const createdAt = nowIso();
       const payloadText = JSON.stringify(resultFinal);
@@ -796,6 +871,32 @@ app.post('/api/batches/confirm', (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ---------- 展厅占用查询（只读；仅列已发布/需复核包的持续占用，待发布不预占） ----------
+app.get('/api/halls/occupancy', (req, res) => {
+  const hall = req.query.hall !== undefined ? String(req.query.hall) : null;
+  let rows = currentOccupancies(db);
+  if (hall !== null) {
+    const key = hall.trim().toLowerCase();
+    rows = key === '' ? [] : rows.filter((o) => o.hallKey === key);
+  }
+  res.json({
+    ok: true,
+    mutated: false,
+    count: rows.length,
+    filter: hall === null ? null : hall,
+    occupancy: rows.map((o) => ({
+      packageId: o.packageId,
+      packageName: o.packageName,
+      packageStatus: o.packageStatus,
+      stopPosition: o.stopPosition,
+      stopName: o.stopName,
+      hallNo: o.hallNo,
+      useFrom: o.useFrom,
+      useTo: o.useTo,
+    })),
+  });
+});
+
 // ---------- 快照 ----------
 app.get('/api/snapshots/:id', (req, res, next) => {
   try {
@@ -923,8 +1024,7 @@ app.post('/api/attestation-keys/rotate', (req, res, next) => {
 app.use((err, req, res, next) => {
   if (err instanceof HttpError || err instanceof ChangeError || err instanceof ScheduleError
     || err instanceof QuoteError || err instanceof SubstituteError || err instanceof BatchError
-    || err instanceof UnsupportedSnapshotError) {
-    return res.status(err.status).json({ error: err.message, details: err.details });
+    || err instanceof UnsupportedSnapshotError) {    return res.status(err.status).json({ error: err.message, details: err.details });
   }
   if (err && err.code === 'SQLITE_CONSTRAINT_TRIGGER') {
     return res.status(409).json({ error: '数据库约束拒绝：' + err.message });

@@ -58,10 +58,15 @@
             <label>起始日期<input name="useFrom" type="date" /></label>
             <label>截止日期<input name="useTo" type="date" /></label>
           </div>
+          <div class="form-row" id="singleHallField">
+            <label class="hall-field">展厅编号（可选；留空不占用。去首尾空白、忽略大小写；同一展厅展期首尾均含，不得与已发布/需复核包重叠）
+              <input name="hallNo" placeholder="例如：A1（可留空）" />
+            </label>
+          </div>
           <div class="form-row hidden" id="stopsEditor">
-            <div class="pick-label">巡展站次（按顺序展出；首尾日期均占用，相邻站不得重叠；不同站可用不同授权，同站不可拼接短授权）</div>
+            <div class="pick-label">巡展站次（按顺序展出；首尾日期均占用，相邻站不得重叠；不同站可用不同授权，同站不可拼接短授权。每站可填展厅编号）</div>
             <table class="auth" id="stopsTable">
-              <tr><th style="width:32px">#</th><th>站点名称</th><th>展示媒介</th><th>展示地区</th><th>起始日</th><th>截止日</th><th></th></tr>
+              <tr><th style="width:32px">#</th><th>站点名称</th><th>展示媒介</th><th>展示地区</th><th>起始日</th><th>截止日</th><th>展厅编号(可选)</th><th></th></tr>
             </table>
             <button type="button" class="btn btn-small" id="addStopBtn">＋ 添加一站</button>
           </div>

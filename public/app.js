@@ -310,6 +310,7 @@ function stopRowHtml(s = {}, idx) {
       <td><input class="stop-region" placeholder="中国大陆 / *" value="${esc(s.region || '')}" /></td>
       <td><input class="stop-from" type="date" value="${s.useFrom || ''}" /></td>
       <td><input class="stop-to" type="date" value="${s.useTo || ''}" /></td>
+      <td><input class="stop-hall" placeholder="A1（可留空）" value="${esc(s.hallNo || '')}" title="可选展厅编号；去首尾空白、忽略大小写；同一展厅展期首尾均含，不得与已发布/需复核包重叠" /></td>
       <td><button type="button" class="btn btn-small btn-danger" data-act="del-stop">删</button></td>
     </tr>`;
 }
@@ -327,6 +328,7 @@ function addStopRow(s) {
 function setMultiStopMode(on, stops) {
   $('#multiStopToggle').checked = !!on;
   $('#singleStopFields').classList.toggle('hidden', !!on);
+  $('#singleHallField').classList.toggle('hidden', !!on);
   $('#stopsEditor').classList.toggle('hidden', !on);
   const f = $('#packageForm');
   ['medium', 'region', 'useFrom', 'useTo'].forEach((n) => { f[n].required = !on; });
@@ -356,6 +358,7 @@ function readStopsFromForm() {
     region: tr.querySelector('.stop-region').value.trim(),
     useFrom: tr.querySelector('.stop-from').value,
     useTo: tr.querySelector('.stop-to').value,
+    hallNo: tr.querySelector('.stop-hall').value.trim(),
   }));
 }
 
@@ -373,6 +376,7 @@ function readPkgForm() {
     b.region = f.region.value.trim();
     b.useFrom = f.useFrom.value;
     b.useTo = f.useTo.value;
+    b.hallNo = f.hallNo.value.trim();
   }
   return b;
 }
@@ -384,6 +388,7 @@ function fillPkgForm(pkg) {
   renderMaterialPick();
   const ids = new Set((pkg.items || pkg.materialIds || []).map((x) => typeof x === 'object' ? x.id : x));
   $$('#materialPick input').forEach((i) => { i.checked = ids.has(Number(i.value)); });
+  f.hallNo.value = pkg.hallNo || '';
   const stops = pkg.stops && pkg.stops.length >= 2 ? pkg.stops : null;
   if (stops) {
     setMultiStopMode(true, stops);
@@ -438,6 +443,25 @@ function pathHtml(pathArr) {
     (i ? ' → ' : '') + `<span>${esc(n.title)}</span>`).join('') + '</div>';
 }
 
+// 展厅占用冲突（包核验 / 批次预览共用）：列出冲突包、站次与重叠日期
+function hallConflictsHtml(hallConflicts) {
+  if (!hallConflicts || !hallConflicts.length) return '';
+  const rows = [];
+  for (const c of hallConflicts) {
+    const where = c.stopPosition == null ? '单站展' : `第 ${c.stopPosition + 1} 站「${esc(c.stopName || '')}」`;
+    for (const x of c.conflicts || []) {
+      const other = x.stopPosition == null
+        ? `包 #${x.packageId}「${esc(x.packageName || '')}」`
+        : `包 #${x.packageId}「${esc(x.packageName || '')}」第 ${x.stopPosition + 1} 站「${esc(x.stopName || '')}」`;
+      rows.push(`<div class="errorline">🚧 本包${where}（展厅 <b>${esc(c.hallNo)}</b>）与 ${other}（展厅 <b>${esc(x.hallNo)}</b>，状态：${esc(x.packageStatus)}）展期重叠：<b>${x.overlapFrom} ～ ${x.overlapTo}</b>（首尾均含，不得被不同包重叠使用）</div>`);
+    }
+  }
+  return `<div class="hall-conflict-box">
+    <div class="section-title">展厅占用冲突（${rows.length} 项；待发布不预占，已发布/需复核持续占用；发布将被拒绝）</div>
+    ${rows.join('')}
+  </div>`;
+}
+
 function failingNodeCard(n) {
   return `
     <div class="card" style="margin-bottom:8px">
@@ -465,6 +489,7 @@ function renderVerifyMulti(result, formData, mode = 'publish') {
   const stopsHtml = result.stops.map((s) => `
     <div class="card stop-card ${s.eligible ? 'stop-ok' : 'stop-bad'}" style="margin-bottom:10px">
       <h3>第 ${s.position + 1} 站：${esc(s.name)}
+        ${s.hallNo ? `<span class="pill pill-neutral">展厅 ${esc(s.hallNo)}</span>` : '<span class="small-muted">（未填展厅）</span>'}
         ${s.eligible ? '<span class="pill pill-ok">本站合格</span>' : `<span class="pill pill-bad">本站失格（${s.stats.failingCount} 个问题节点）</span>`}
         <span class="small-muted">${esc(s.medium)} ｜ ${esc(s.region)} ｜ ${s.useFrom} → ${s.useTo}</span>
       </h3>
@@ -472,12 +497,14 @@ function renderVerifyMulti(result, formData, mode = 'publish') {
       ${s.failingNodes.map(failingNodeCard).join('')}
     </div>`).join('');
 
-  const actionArea = mode === 'publish' && result.eligible && formData.packageId ? `
+  const actionArea = mode === 'publish' && result.eligible && !(result.hallConflicts || []).length && formData.packageId ? `
       <div class="pkg-actions">
         <button class="btn btn-primary" id="publishBtn">按此次核验结果原子发布（冻结各站结果与清单）</button>
-        <span class="small-muted">发布将在同一事务内重读行程、清单与授权依据并逐站重算；任一站变化或不合格都会整包拒绝。</span>
+        <span class="small-muted">发布将在同一事务内重读行程、清单、授权依据与展厅占用并逐站重算；任一站变化、不合格或展厅冲突都会整包拒绝。</span>
       </div>`
-    : (mode === 'publish' && result.eligible ? '<div class="small-muted">请先「保存待发布包」，再执行发布。</div>' : '');
+    : (mode === 'publish' && result.eligible && (result.hallConflicts || []).length
+        ? '<div class="errorline">存在展厅占用冲突，不能发布：请更换冲突站的展厅编号或调整展期（待发布包不预占，冲突来自已发布/需复核包或本批次内其他包）。</div>'
+        : (mode === 'publish' && result.eligible ? '<div class="small-muted">请先「保存待发布包」，再执行发布。</div>' : ''));
 
   panel.innerHTML = `
     <div class="verdict ${result.eligible ? 'pass' : 'fail'}">
@@ -485,6 +512,7 @@ function renderVerifyMulti(result, formData, mode = 'publish') {
       <span class="sub">共 ${result.stats.stopCount} 站 · 失格 ${result.stats.failingStopCount} 站 · 入展品 ${result.stats.rootCount} 个 · 来源链节点 ${result.stats.nodeCount} 个 · 核验依据版本 ${result.basisVersion}</span>
     </div>
     ${globalErrs}${itemErrs}
+    ${hallConflictsHtml(result.hallConflicts)}
     ${stopsHtml}
     ${actionArea}`;
 
@@ -514,19 +542,27 @@ function renderVerify(result, formData, mode = 'publish') {
     : (result.eligible ? '✓ 核验通过：来源链上每个节点都有未撤销且覆盖整段使用的授权，可以发布。'
                       : '✗ 核验不通过：存在不合格节点或输入错误，禁止发布。');
 
-  const actionArea = mode === 'publish' && result.eligible && formData.packageId ? `
+  const hallBusy = (result.hallConflicts || []).length > 0;
+  const actionArea = mode === 'publish' && result.eligible && !hallBusy && formData.packageId ? `
       <div class="pkg-actions">
         <button class="btn btn-primary" id="publishBtn">按此次核验结果原子发布</button>
-        <span class="small-muted">发布将再次按当前数据重算并校验依据版本；若期间授权被修改会被拒绝。</span>
+        <span class="small-muted">发布将再次按当前数据重算并校验依据版本与展厅占用；若期间授权被修改或展厅被占用会被拒绝。</span>
       </div>`
-    : (mode === 'publish' && result.eligible ? '<div class="small-muted">请先「保存待发布包」，再执行发布。</div>' : '');
+    : (mode === 'publish' && result.eligible && hallBusy
+        ? '<div class="errorline">存在展厅占用冲突，不能发布：请更换展厅编号或调整展期（待发布包不预占，冲突来自已发布/需复核包）。</div>'
+        : (mode === 'publish' && result.eligible ? '<div class="small-muted">请先「保存待发布包」，再执行发布。</div>' : ''));
+
+  const hallLine = result.request && result.request.hallNo
+    ? `<div class="small-muted">展厅编号：<b>${esc(result.request.hallNo)}</b>（去空白、忽略大小写匹配）</div>` : '';
 
   panel.innerHTML = `
     <div class="verdict ${result.eligible ? 'pass' : 'fail'}">
       ${verdictText}
       <span class="sub">入展品 ${result.stats.rootCount} 个 · 来源链节点 ${result.stats.nodeCount} 个 · 不合格 ${result.stats.failingCount} 个 · 核验依据版本 ${result.basisVersion}</span>
     </div>
+    ${hallLine}
     ${globalErrs}${itemErrs}
+    ${hallConflictsHtml(result.hallConflicts)}
     ${result.eligible ? '' : (fail || '<div class="small-muted">所有节点均满足授权要求（但可能存在上方全局错误）。</div>')}
     ${actionArea}`;
 
@@ -730,12 +766,13 @@ function renderPackages() {
         ${p.multiStop
           ? `多站巡展：<b>${p.stopCount} 站</b>（整包共享素材 ${p.itemCount} 项）${p.publishedAt ? `｜ 发布于 ${p.publishedAt.slice(0, 19).replace('T', ' ')}` : ''}`
           : `媒介：${esc(p.medium)} ｜ 地区：${esc(p.region)} ｜ 使用期：${p.useFrom} → ${p.useTo}
+        ｜ 展厅：${p.hallNo ? `<b>${esc(p.hallNo)}</b>` : '<span class="small-muted">未填（不占用）</span>'}
         ｜ 素材 ${p.itemCount} 项${p.publishedAt ? `｜ 发布于 ${p.publishedAt.slice(0, 19).replace('T', ' ')}` : ''}`}
       </div>
       ${p.multiStop ? `
       <div class="pkg-meta" style="margin-top:4px">
         <div class="section-title">站次行程</div>
-        ${(p.stops || []).map((s, i) => `<span class="chip">${i + 1}. ${esc(s.name)}（${esc(s.medium)} / ${esc(s.region)}，${s.useFrom} → ${s.useTo}）</span>`).join(' ')}
+        ${(p.stops || []).map((s, i) => `<span class="chip">${i + 1}. ${esc(s.name)}（${esc(s.medium)} / ${esc(s.region)}，${s.useFrom} → ${s.useTo}${s.hallNo ? `，展厅 <b>${esc(s.hallNo)}</b>` : ''}）</span>`).join(' ')}
       </div>` : ''}
       <div class="pkg-meta" style="margin-top:4px">
         素材：${p.items.map((i) => esc(i.title)).join('、')}
@@ -1362,7 +1399,7 @@ function batchStopsHtml(stops) {
   return (stops || []).map((st) => `
     <div class="stop-card ${st.eligible ? 'stop-ok' : 'stop-bad'}" style="margin-top:6px">
       <div class="section-title">第 ${st.position + 1} 站：${esc(st.name)}
-        （${esc(st.medium)} / ${esc(st.region)}，${st.useFrom} → ${st.useTo}）
+        （${esc(st.medium)} / ${esc(st.region)}，${st.useFrom} → ${st.useTo}${st.hallNo ? `，展厅 <b>${esc(st.hallNo)}</b>` : ''}）
         ${st.eligible ? '<span class="pill pill-ok">合格</span>' : `<span class="pill pill-bad">失格 ${st.failingNodeCount} 节点</span>`}</div>
       ${(st.errors || []).map((m) => `<div class="errorline">${esc(m)}</div>`).join('')}
       ${st.eligible
@@ -1371,23 +1408,33 @@ function batchStopsHtml(stops) {
     </div>`).join('');
 }
 
+function batchHallHtml(p) {
+  return hallConflictsHtml(p.hallConflicts && p.hallConflicts.map((c) => ({
+    stopPosition: c.stopPosition, stopName: c.stopName, hallNo: c.hallNo, conflicts: c.conflicts,
+  })));
+}
+
 function renderBatchPreview(box, r) {
+  const hallN = r.hallConflictCount || 0;
   const head = r.eligible
-    ? `<div class="verdict pass">✓ 批次预览通过：${r.packageCount} 个包逐包（逐站）重算全部合格，可整批发布。
-         <span class="sub">共同核验依据版本 <b>${r.basisVersion}</b> ｜ 合格 ${r.eligibleCount}/${r.packageCount} ｜ 预览只读，未写入任何数据、依据版本不变</span></div>`
-    : `<div class="verdict fail">✗ 批次预览不通过：${r.failingCount} 个包失格，已按包列出缺口并禁止确认。
-         <span class="sub">共同核验依据版本 ${r.basisVersion} ｜ 合格 ${r.eligibleCount}/${r.packageCount} ｜ 预览不写入任何数据；请修正失格包后重新预览</span></div>`;
+    ? `<div class="verdict pass">✓ 批次预览通过：${r.packageCount} 个包逐包（逐站）重算全部合格、展厅占用无冲突，可整批发布。
+         <span class="sub">共同核验依据版本 <b>${r.basisVersion}</b> ｜ 合格 ${r.eligibleCount}/${r.packageCount} ｜ 展厅冲突 0 ｜ 预览只读，未写入任何数据、依据版本不变</span></div>`
+    : `<div class="verdict fail">✗ 批次预览不通过：${r.failingCount} 个包失格或存在展厅占用冲突${hallN ? `（展厅冲突 ${hallN} 项，含与已发布/需复核包冲突及本批内部互查）` : ''}，已按包列出并禁止确认。
+         <span class="sub">共同核验依据版本 ${r.basisVersion} ｜ 合格 ${r.eligibleCount}/${r.packageCount} ｜ 预览不写入任何数据；请修正后重新预览</span></div>`;
 
   const globalErrs = r.packages.flatMap((p) =>
     (p.globalErrors || []).map((m) => `<div class="errorline">包 #${p.packageId}「${esc(p.packageName)}」：${esc(m)}</div>`));
 
   box.innerHTML = head + globalErrs + r.packages.map((p) => `
-    <div class="impact-pkg" style="border-color:${p.eligible ? '#cfe3d6' : '#f0c9c5'}">
+    <div class="impact-pkg" style="border-color:${p.eligible && !p.hallConflictCount ? '#cfe3d6' : '#f0c9c5'}">
       <h4>${esc(p.packageName)} <span class="small-muted">#${p.packageId}</span>
         ${p.multiStop ? '<span class="pill pill-neutral">多站巡展</span>' : '<span class="pill pill-neutral">单站</span>'}
-        ${p.eligible ? '<span class="pill pill-ok">逐站合格</span>' : '<span class="pill pill-bad">失格</span>'}
+        ${p.eligible ? '<span class="pill pill-ok">逐站合格</span>' : '<span class="pill pill-bad">核验失格</span>'}
+        ${p.hallConflictCount ? `<span class="pill pill-bad">展厅冲突 ${p.hallConflictCount}</span>` : ''}
       </h4>
       <div class="small-muted">${esc(batchScopeLine(p))} ｜ 清单指纹 <code>${p.listFingerprint.slice(0, 12)}</code> ｜ 行程指纹 <code>${p.itineraryFingerprint.slice(0, 12)}</code></div>
+      ${!p.multiStop && p.hallNo ? `<div class="small-muted">展厅编号：<b>${esc(p.hallNo)}</b></div>` : ''}
+      ${batchHallHtml(p)}
       ${batchStopsHtml(p.stops)}
     </div>`).join('');
 

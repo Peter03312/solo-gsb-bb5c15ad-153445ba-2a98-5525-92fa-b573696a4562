@@ -1762,6 +1762,194 @@ async function call(method, url, body) {
       '批次各包凭证各自封存完整来源子图');
   }
 
+  console.log('20) 展厅编号：可选、去空白忽略大小写、闭区间占用；单包/批次闸门与占用查询')
+  {
+    const mkH = async (t) => (await call('POST', '/api/materials', { title: t, kind: 'x' })).data.id;
+    const addH = async (mid) => (await call('POST', `/api/materials/${mid}/authorizations`,
+      { media: '*', region: '*', validFrom: '2020-01-01', validTo: '2100-12-31' })).status === 201;
+    const mkPkg = async (name, body) => (await call('POST', '/api/packages', { name, ...body })).data.id;
+    const SPRING = { useFrom: '2026-03-01', useTo: '2026-03-31' };
+
+    const H1 = await mkH('展厅素材1'), H2 = await mkH('展厅素材2'), H3 = await mkH('展厅素材3');
+    await addH(H1); await addH(H2); await addH(H3);
+
+    // 20.1 无编号兼容：不传 hallNo 的包 DTO 为 null，核验结果无 hallConflicts 字段冲突
+    const pn = await mkPkg('展厅-无编号N', { medium: '屏幕放映', region: '中国大陆', ...SPRING, materialIds: [H1] });
+    {
+      const dto = await call('GET', `/api/packages/${pn}`);
+      ok(dto.data.hallNo === null, '无编号包 DTO hallNo=null（兼容旧请求）');
+      const v = await call('POST', '/api/verify', { packageId: pn });
+      ok(v.data.eligible === true && v.data.hallConflictCount === 0, '无编号包核验合格且无展厅冲突');
+    }
+
+    // 20.2 编号去首尾空白存储；忽略大小写匹配
+    const pa = await mkPkg('展厅-A（a1）', {
+      medium: '屏幕放映', region: '中国大陆', ...SPRING, hallNo: '  A1 ', materialIds: [H1],
+    });
+    {
+      const dto = await call('GET', `/api/packages/${pa}`);
+      ok(dto.data.hallNo === 'A1', '编号去首尾空白存储（"  A1 " -> "A1"）');
+      // 待发布不预占：即便与后续包同厅，单包核验此时不互查其它草稿
+      const v = await call('POST', '/api/verify', { packageId: pa });
+      ok(v.data.request.hallNo === 'A1' && v.data.hallConflictCount === 0, '待发布编号保存但不预占（对已发布占用无冲突）');
+      const b = (await call('GET', '/api/state')).data.basisVersion;
+      const pub = await call('POST', `/api/packages/${pa}/publish`, { basisVersion: b });
+      ok(pub.status === 201, '展厅 A1 包发布成功');
+      ok(pub.data.attestation.body.itinerary.stops[0].hallNo === 'A1', '发布凭证行程冻结展厅编号 A1');
+    }
+
+    // 20.3 同展厅（小写 a1）闭区间同日重叠 -> 核验列冲突、发布 422 HALL_CONFLICT 且留痕
+    const pb = await mkPkg('展厅-B（a1 重叠）', {
+      medium: '屏幕放映', region: '中国大陆', useFrom: '2026-03-31', useTo: '2026-04-10',
+      hallNo: 'a1', materialIds: [H2],
+    });
+    {
+      const v = await call('POST', '/api/verify', { packageId: pb });
+      const c = v.data.hallConflicts[0];
+      ok(v.data.eligible === true && v.data.hallConflictCount === 1
+        && c.conflicts[0].packageId === pa
+        && c.conflicts[0].overlapFrom === '2026-03-31' && c.conflicts[0].overlapTo === '2026-03-31',
+        '核验列出冲突包、重叠日期（忽略大小写，3/31 首尾相接算重叠）');
+      const b = (await call('GET', '/api/state')).data.basisVersion;
+      const pub = await call('POST', `/api/packages/${pb}/publish`, { basisVersion: b });
+      ok(pub.status === 422 && pub.data.details.code === 'HALL_CONFLICT'
+        && !!pub.data.details.snapshotId
+        && pub.data.details.result.hallConflictCount === 1,
+        '展厅冲突发布 422 HALL_CONFLICT，沿用失败留痕（附 snapshotId 与结果）');
+      const dto = await call('GET', `/api/packages/${pb}`);
+      ok(dto.data.status === 'draft'
+        && dto.data.snapshots.some((s) => s.kind === 'publish' && !s.eligible),
+        '冲突包保持 draft，失败尝试留存为不可变快照');
+    }
+
+    // 20.4 紧邻不重叠（4/1 晚于 3/31）可发布；不同展厅同期也可并存
+    const pc = await mkPkg('展厅-C（紧邻 a1）', {
+      medium: '屏幕放映', region: '中国大陆', useFrom: '2026-04-01', useTo: '2026-04-10',
+      hallNo: 'A1', materialIds: [H2],
+    });
+    const pd = await mkPkg('展厅-D（B1 同期）', {
+      medium: '屏幕放映', region: '中国大陆', ...SPRING, hallNo: 'B1', materialIds: [H3],
+    });
+    {
+      const b = (await call('GET', '/api/state')).data.basisVersion;
+      const pubC = await call('POST', `/api/packages/${pc}/publish`, { basisVersion: b });
+      ok(pubC.status === 201, '紧邻（后站起 4/1 晚于前站止 3/31）不重叠，可发布');
+      const pubD = await call('POST', `/api/packages/${pd}/publish`, { basisVersion: b });
+      ok(pubD.status === 201, '不同展厅（B1）同期并存可发布');
+    }
+
+    // 20.5 占用查询：忽略大小写过滤
+    {
+      const occ = await call('GET', '/api/halls/occupancy?hall=  a1 ');
+      const pks = occ.data.occupancy.map((o) => o.packageId).sort((x, y) => x - y);
+      ok(occ.status === 200 && pks.join() === [pa, pc].sort((x, y) => x - y).join()
+        && occ.data.occupancy.every((o) => o.packageStatus === 'published'),
+        '占用查询仅列已发布/需复核占用，忽略大小写过滤到 A1 两包');
+    }
+
+    // 20.6 编辑清空编号（空白串）后不再占用/不冲突；已发布包编号不可改（冻结）
+    const pe = await mkPkg('展厅-E（待清空）', {
+      medium: '屏幕放映', region: '中国大陆', useFrom: '2026-03-10', useTo: '2026-03-12',
+      hallNo: 'a1', materialIds: [H1],
+    });
+    {
+      const patched = await call('PATCH', `/api/packages/${pe}`, {
+        name: '展厅-E（待清空）', medium: '屏幕放映', region: '中国大陆',
+        useFrom: '2026-03-10', useTo: '2026-03-12', hallNo: '   ', materialIds: [H1],
+      });
+      ok(patched.status === 200 && patched.data.hallNo === null, '编辑时空白编号归一为 null（未填写沿用原流程）');
+      const v = await call('POST', '/api/verify', { packageId: pe });
+      ok(v.data.request.hallNo === null && v.data.hallConflictCount === 0, '清空编号后无冲突');
+      const patchPublished = await call('PATCH', `/api/packages/${pa}`, {
+        name: '展厅-A（a1）', medium: '屏幕放映', region: '中国大陆', ...SPRING,
+        hallNo: 'Z9', materialIds: [H1],
+      });
+      ok(patchPublished.status === 409, '已发布包编号随参数冻结，不可修改');
+    }
+
+    // 20.7 复制已发布包：副本保留编号但为 draft（不预占，可改）
+    {
+      const cp = await call('POST', `/api/packages/${pa}/copy`);
+      ok(cp.status === 201 && !!cp.data.id, '复制已发布带编号包成功');
+      const dto = await call('GET', `/api/packages/${cp.data.id}`);
+      ok(dto.data.status === 'draft' && dto.data.hallNo === 'A1', '副本保留编号 A1 但为待发布（不预占）');
+      global.hallCopyId = cp.data.id;
+    }
+
+    // 20.8 多站每站编号：逐站占用；与已发布某站冲突则按站列出
+    const pm = await mkPkg('展厅-多站M', {
+      materialIds: [H1],
+      stops: [
+        { name: '站甲', media: '屏幕放映', region: '中国大陆', useFrom: '2026-06-01', useTo: '2026-06-10', hallNo: 'C1' },
+        { name: '站乙', media: '屏幕放映', region: '中国大陆', useFrom: '2026-07-01', useTo: '2026-07-10', hallNo: 'C2' },
+      ],
+    });
+    const pq = await mkPkg('展厅-单站Q（撞多站站乙厅）', {
+      medium: '屏幕放映', region: '中国大陆', useFrom: '2026-07-05', useTo: '2026-07-06',
+      hallNo: 'c2', materialIds: [H2],
+    });
+    {
+      // pm 还是 draft 时，单包核验 pq 不与草稿 pm 冲突（草稿不预占）
+      const vq0 = await call('POST', '/api/verify', { packageId: pq });
+      ok(vq0.data.hallConflictCount === 0, '草稿多站不预占：单包核验不与草稿站冲突');
+      // 批次预览：pm/pq 同批 -> 内部互查，按包按站列出冲突，无 confirmToken
+      const pv = await call('POST', '/api/batches/preview', { packageIds: [pm, pq] });
+      ok(pv.status === 200 && pv.data.eligible === false && !pv.data.confirmToken
+        && pv.data.hallConflictCount >= 2,
+        '批次预览：内部展厅互查（忽略大小写），不列确认凭据');
+      const qEntry = pv.data.packages.find((p) => p.packageId === pq);
+      ok(qEntry.hallConflictCount >= 1
+        && qEntry.hallConflicts[0].conflicts.some((c) => c.packageId === pm && c.stopPosition === 1
+          && c.overlapFrom === '2026-07-05'),
+        '批次预览列出冲突包（多站包）、站次（第 2 站）与重叠日期');
+
+      // pq 改到无冲突展厅后，批次预览合格、发放凭据并可整批发布
+      await call('PATCH', `/api/packages/${pq}`, {
+        name: '展厅-单站Q（改厅）', medium: '屏幕放映', region: '中国大陆',
+        useFrom: '2026-07-05', useTo: '2026-07-06', hallNo: 'D8', materialIds: [H2],
+      });
+      const pv2 = await call('POST', '/api/batches/preview', { packageIds: [pm, pq] });
+      ok(pv2.data.eligible === true && pv2.data.hallConflictCount === 0 && !!pv2.data.confirmToken,
+        '改厅后批次预览合格（授权 + 展厅均无冲突）');
+      const cf = await call('POST', '/api/batches/confirm', { confirmToken: pv2.data.confirmToken });
+      ok(cf.status === 201, '批次整批确认 201（多站逐站编号随发布冻结）');
+      const multiSealed = cf.data.packages.find((p) => p.packageId === pm);
+      ok(multiSealed.attestation.body.itinerary.stops.map((s) => s.hallNo).join() === 'C1,C2',
+        '批次多站凭证冻结各站展厅编号 C1/C2');
+      // 发布后多站站次冻结（hall 含在 package_stops 触发器保护内）
+      global.hallMultiId = pm;
+    }
+
+    // 20.9 发布后占用持续：新包再撞 C1 6 月展期被发布闸门拒绝（重查当前占用）
+    const pr = await mkPkg('展厅-R（撞已发布多站C1）', {
+      medium: '屏幕放映', region: '中国大陆', useFrom: '2026-06-05', useTo: '2026-06-06',
+      hallNo: 'c1', materialIds: [H3],
+    });
+    {
+      const v = await call('POST', '/api/verify', { packageId: pr });
+      ok(v.data.hallConflictCount === 1
+        && v.data.hallConflicts[0].conflicts.some((c) => c.packageId === pm && c.stopPosition === 0),
+        '已发布多站包的展厅持续占用，新包核验列出冲突站次');
+      const b = (await call('GET', '/api/state')).data.basisVersion;
+      const pub = await call('POST', `/api/packages/${pr}/publish`, { basisVersion: b });
+      ok(pub.status === 422 && pub.data.details.code === 'HALL_CONFLICT',
+        '发布事务内重查当前占用：与已发布多站站冲突时 422 拒绝');
+    }
+
+    // 20.10 需复核包持续占用：撤销授权使已发布包 pc（A1，4 月）转 needs_review，其展厅仍被占用
+    {
+      const auths = (await call('GET', '/api/materials')).data.find((m) => m.id === H2).authorizations;
+      await call('POST', `/api/authorizations/${auths[0].id}/revoke`);
+      const pcDto = await call('GET', `/api/packages/${pc}`);
+      ok(pcDto.data.status === 'needs_review', '撤销授权后含 H2 的已发布包 pc 转为需复核');
+      const occA1 = await call('GET', '/api/halls/occupancy?hall=A1');
+      const hit = occA1.data.occupancy.find((o) => o.packageId === pc);
+      ok(!!hit && hit.packageStatus === 'needs_review'
+        && hit.useFrom === '2026-04-01' && hit.useTo === '2026-04-10',
+        '已发布包转为需复核后，其 A1 4 月展厅占用仍持续（needs_review 持续占用）');
+    }
+  }
+
   console.log(`\n结果: ${pass} 通过, ${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

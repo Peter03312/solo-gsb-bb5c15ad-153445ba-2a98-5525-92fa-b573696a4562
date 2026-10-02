@@ -29,6 +29,15 @@ const {
 const { listFingerprint, itineraryFingerprint } = require('./substitutes');
 const { buildAttestation } = require('./attest');
 const { nowIso } = require('./db');
+const {
+  claimsFromResult,
+  conflictsAgainstCurrent,
+  conflictsInternal,
+  flattenReport,
+  mergeReports,
+  groupConflictsByPackage,
+  describeConflict,
+} = require('./halls');
 
 const MIN_PACKAGES = 2;
 const MAX_PACKAGES = 20;
@@ -153,8 +162,28 @@ function buildPackageEntry(db, ctx, commonBasis) {
     listFingerprint: ctx.listFp,
     itineraryFingerprint: ctx.itineraryFp,
     stops: stopSummaries(ctx, result),
+    claims: claimsFromResult(result, ctx.pkg.id, ctx.pkg.name),
     result, // 完整核验结果（与 /api/verify 同构；快照 payload 即以此封存）
   };
+}
+
+// 计算批次的展厅冲突：① 各包对当前已发布/需复核占用；② 批次内各包互查。
+// 返回扁平冲突列表（每条含发起包与冲突包/站次/重叠日期）。
+function batchHallConflicts(db, entries) {
+  const byPkg = new Map(entries.map((e) => [e.packageId, { packageName: e.packageName, claims: e.claims }]));
+  const againstCurrent = flattenReport(conflictsAgainstCurrent(db, byPkg));
+  const internal = flattenReport(conflictsInternal(byPkg));
+  return mergeReports(againstCurrent, internal);
+}
+
+// 把展厅冲突挂到预览条目（按发起包分组）
+function attachHallConflictsToEntries(entries, flatConflicts) {
+  const groups = groupConflictsByPackage(flatConflicts);
+  for (const entry of entries) {
+    const g = groups.find((x) => x.packageId === entry.packageId);
+    entry.hallConflictCount = g ? g.claims.reduce((n, c) => n + c.conflicts.length, 0) : 0;
+    entry.hallConflicts = g ? g.claims : [];
+  }
 }
 
 // ---------- 主入口：预览（只读事务；不写入任何数据） ----------
@@ -164,8 +193,15 @@ function previewBatch(db, rawBody) {
     const commonBasis = basisVersion(db);
     const contexts = packageIds.map((id) => loadPackageContext(db, id));
     const packages = contexts.map((ctx) => buildPackageEntry(db, ctx, commonBasis));
-    const eligible = packages.every((p) => p.eligible);
-    const failing = packages.filter((p) => !p.eligible);
+    // 展厅占用冲突：对当前已发布/需复核占用 + 批次内各包互查（闭区间、首尾均含、忽略大小写）
+    const hallFlat = batchHallConflicts(db, packages);
+    attachHallConflictsToEntries(packages, hallFlat);
+
+    const verifyFailing = packages.filter((p) => !p.eligible);
+    const hallBlocking = packages.filter((p) => p.hallConflictCount > 0);
+    // 批次可确认当且仅当：逐包逐站授权核验全部合格 且 无任何展厅占用冲突
+    const eligible = packages.every((p) => p.eligible) && hallBlocking.length === 0;
+    const failing = packages.filter((p) => !p.eligible || p.hallConflictCount > 0);
 
     const preview = {
       generatedAt: new Date().toISOString(),
@@ -177,13 +213,15 @@ function previewBatch(db, rawBody) {
       eligible,
       eligibleCount: packages.length - failing.length,
       failingCount: failing.length,
+      hallConflictCount: hallFlat.length,
+      hallConflicts: groupConflictsByPackage(hallFlat),
       packages: packages.map(stripResultForPreview),
       message: eligible
-        ? `联展批次 ${packageIds.length} 个包逐包（逐站）重算全部合格：可携带预览凭据在同一事务内整批发布。预览未写入任何数据。`
-        : `联展批次存在 ${failing.length} 个失格包：已按包列出缺口，禁止确认。预览未写入任何数据。`,
+        ? `联展批次 ${packageIds.length} 个包逐包（逐站）重算全部合格且展厅占用无冲突：可携带预览凭据在同一事务内整批发布。预览未写入任何数据。`
+        : `联展批次不可确认：${verifyFailing.length} 个包核验失格、${hallBlocking.length} 个包存在展厅占用冲突，已按包列出缺口与冲突，禁止确认。预览未写入任何数据。`,
     };
 
-    if (!eligible) return preview; // 失格：不发放凭据，禁止确认
+    if (!eligible) return preview; // 失格或展厅冲突：不发放凭据，禁止确认
 
     // 全部合格：发放一次性确认凭据（携带包集合、共同依据版本、各包双指纹）
     preview.confirmToken = {
@@ -200,10 +238,10 @@ function previewBatch(db, rawBody) {
   })();
 }
 
-// 预览对外结构：缺口需要逐站失格节点；完整 result 仅保留在服务端事务内封存路径不对外重复膨胀，
-// 但为与既有 /api/verify 体验一致，仍给出 stops（已含 failingNodes）。这里不返回完整 result。
+// 预览对外结构：缺口需要逐站失格节点、展厅冲突需要冲突包/站次/重叠日期；
+// 完整 result 与内部 claims 不对外（避免膨胀），stops/hallConflicts 已含全部展示要素。
 function stripResultForPreview(p) {
-  const { result, commonBasis, ...rest } = p;
+  const { result, commonBasis, claims, ...rest } = p;
   return rest;
 }
 
@@ -294,6 +332,36 @@ function confirmBatch(db, rawBody) {
             result: r.result,
           })),
         });
+    }
+
+    // 4b) 同一事务内重查【授权之外的展厅占用】：当前已发布/需复核占用 + 本批内部互查。
+    //     过期预览不得绕过复查；冲突即整批拒绝（无快照、凭证或部分发布）。
+    const recomputeEntries = results.map(({ ctx, result }) => ({
+      packageId: ctx.pkg.id,
+      packageName: ctx.pkg.name,
+      claims: claimsFromResult(result, ctx.pkg.id, ctx.pkg.name),
+    }));
+    const hallFlat = batchHallConflicts(db, recomputeEntries);
+    if (hallFlat.length) {
+      const groups = groupConflictsByPackage(hallFlat);
+      const detailByPkg = new Map(groups.map((g) => [g.packageId, g.claims]));
+      throw new BatchError(422,
+        `联展批次重查发现展厅占用冲突（同一展厅展期首尾均含，不得重叠），整批拒绝：未产生快照、凭证或部分发布。\n`
+        + hallFlat.map(describeConflict).join('；'),
+        {
+          code: 'HALL_CONFLICT',
+          hallConflicts: groups,
+          packages: results.map(({ ctx }) => ({
+            packageId: ctx.pkg.id,
+            packageName: ctx.pkg.name,
+            hallConflicts: detailByPkg.get(ctx.pkg.id) || [],
+          })).filter((p) => p.hallConflicts.length),
+        });
+    }
+    // 无冲突：把空展厅结论一并写入各包封存 payload（保持快照结构一致）
+    for (const { ctx, result } of results) {
+      result.hallConflicts = [];
+      result.hallConflictCount = 0;
     }
 
     // 5) 全部合格：先逐包封存不可变发布快照 + 签名凭证，再一起转为已发布。

@@ -141,3 +141,9 @@ pre.json { background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 8p
 
 /* 联展批次选择 */
 #batchPick label.pick-disabled { opacity: .45; cursor: not-allowed; text-decoration: line-through; }
+
+/* 展厅占用冲突 */
+.hall-conflict-box { border: 1px solid #e0a49d; background: #fdf3f2; border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.hall-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #444; max-width: 520px; }
+.hall-field input { padding: 7px 10px; border: 1px solid #c7ccd4; border-radius: 6px; }
+#singleHallField .hall-field input { max-width: 260px; }
